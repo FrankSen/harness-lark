@@ -27,8 +27,9 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     selection: { current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
     cwd: { value: '/work' },
     availableModels: [
-      { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+      { provider: 'deepseek-official', model: 'deepseek-v4-flash', image: false },
+      { provider: 'deepseek-official', model: 'deepseek-v4-pro', image: false },
+      { provider: 'deepseek-official', model: 'mimo-v2-pro', image: true },
     ],
     client: {
       account: {

@@ -26,8 +26,8 @@ export interface CommandContext {
   selection: { current: ModelSelection | undefined }
   /** Working directory for this chat (mutated by /cd via this mutable holder). */
   cwd: { value: string }
-  /** List of available models (provider/model pairs). */
-  availableModels: Array<{ provider: string; model: string }>
+  /** List of available models (provider/model pairs + image capability). */
+  availableModels: Array<{ provider: string; model: string; image: boolean }>
   /** The Lark client, for auth/doctor diagnostics. */
   client: LarkClient
   /** The message sender's open_id (for /feishu auth scoping). */
@@ -104,11 +104,11 @@ function model(arg: string, ctx: CommandContext): CommandResult {
     const list = ctx.availableModels
       .map((m) => {
         const mark = current && current.provider === m.provider && current.model === m.model ? ' *' : ''
-        return `  ${m.provider}/${m.model}${mark}`
+        return `  ${m.provider}/${m.model}${m.image ? ' 🖼️' : ''}${mark}`
       })
       .join('\n')
     return {
-      reply: `当前模型: ${current ? `${current.provider}/${current.model}` : '（默认）'}\n可用模型:\n${list}\n\n切换: /model <provider/model>`,
+      reply: `当前模型: ${current ? `${current.provider}/${current.model}` : '（默认）'}\n可用模型:\n${list}\n\n切换: /model <provider/model>\n🖼️ = 支持图片识别（可配合飞书图片消息使用）`,
       handled: true,
     }
   }
@@ -123,7 +123,7 @@ function model(arg: string, ctx: CommandContext): CommandResult {
     return { reply: `未找到模型 "${arg}"。用 /model 查看可用列表。`, handled: true }
   }
   ctx.selection.current = { provider: match.provider, model: match.model }
-  return { reply: `已切换模型: ${match.provider}/${match.model}（下一轮生效）`, handled: true }
+  return { reply: `已切换模型: ${match.provider}/${match.model}${match.image ? '（支持图片）' : ''}（下一轮生效）`, handled: true }
 }
 
 function cd(arg: string, ctx: CommandContext): CommandResult {
@@ -252,11 +252,11 @@ async function settingModel(arg: string, ctx: CommandContext): Promise<CommandRe
     const list = ctx.availableModels
       .map((m) => {
         const mark = current.provider === m.provider && current.model === m.model ? ' *' : ''
-        return `  ${m.provider}/${m.model}${mark}`
+        return `  ${m.provider}/${m.model}${m.image ? ' 🖼️' : ''}${mark}`
       })
       .join('\n')
     return {
-      reply: `⚙️ 默认模型设置\n当前默认: ${current.provider}/${current.model}\n\n可用模型:\n${list}\n\n设置: /setting model <provider/model>，例如 /setting model deepseek-official/deepseek-v4-flash\n说明: 默认模型作用于之后新建的会话；当前会话用 /model 切换`,
+      reply: `⚙️ 默认模型设置\n当前默认: ${current.provider}/${current.model}\n\n可用模型:\n${list}\n\n设置: /setting model <provider/model>，例如 /setting model deepseek-official/deepseek-v4-flash\n说明: 默认模型作用于之后新建的会话；当前会话用 /model 切换\n🖼️ = 支持图片识别`,
       handled: true,
     }
   }

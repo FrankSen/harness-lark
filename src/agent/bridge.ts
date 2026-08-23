@@ -19,7 +19,7 @@ import {
   type ModelSelection,
   type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import type { HarnessLarkConfig } from '../core/config-schema.ts'
 import type { MessageContext } from '../core/types.ts'
 import { sendText, type SendMessageParams } from '../messaging/outbound/deliver.ts'
+import { downloadMessageResource } from '../messaging/outbound/media.ts'
 import { addReaction, removeReaction, removeReactionByEmoji } from '../messaging/outbound/reactions.ts'
 import type { LarkClient } from '../core/lark-client.ts'
 import { runWithSender } from '../core/sender-context.ts'
@@ -37,6 +38,36 @@ import { runCommand } from './commands.ts'
 /** Reaction emoji: in-progress and done. */
 const PROCESSING_EMOJI = 'Get'
 const DONE_EMOJI = 'DONE'
+
+/** Minimal durable image reference shape (mirror of dsh-attachment). */
+interface ImageRef {
+  attachmentId: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  bytes: number
+  width: number
+  height: number
+  name?: string
+}
+
+/** Minimal dsh attachment store face used to save inbound Feishu images. */
+interface AttachmentStore {
+  saveImage(input: { data: Uint8Array; mediaType: string; name?: string }): Promise<ImageRef>
+}
+
+/** Normalize a Feishu resource content-type into a dsh image media type. */
+function imageMediaType(contentType: string | undefined): 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | undefined {
+  const type = contentType?.toLowerCase().split(';')[0]?.trim()
+  switch (type) {
+    case 'image/png':
+    case 'image/jpeg':
+    case 'image/jpg':
+    case 'image/webp':
+    case 'image/gif':
+      return type === 'image/jpg' ? 'image/jpeg' : type
+    default:
+      return undefined
+  }
+}
 
 /** Bridge diagnostics go to stdout so they surface in container logs. */
 function blog(level: 'info' | 'warn' | 'error', msg: string): void {
@@ -306,11 +337,21 @@ export class AgentBridge {
     // ── Reaction feedback: mark the user's message "Get" while processing ──
     void this.markProcessing(record, message)
 
+    // Vision: download and save an inbound image so the model sees it directly
+    // (image content block) instead of only a placeholder + download hint.
+    const imageRef = await this.resolveInboundImage(message)
+
+    const content: ContentBlock[] = [
+      { type: 'text', text },
+    ]
+    if (imageRef !== undefined) {
+      content.push({ type: 'image', attachment: imageRef } as unknown as ContentBlock)
+    }
     const userMessage = createUserMessage({
-      content: [{ type: 'text', text }],
+      content,
       source: { kind: 'user' },
     })
-    blog('info', `followup to ${key}: ${text.slice(0, 60)}`)
+    blog('info', `followup to ${key}: ${text.slice(0, 60)}${imageRef !== undefined ? ` + image(${imageRef.bytes}B)` : ''}`)
     // Record the sender so tools running inside this turn can act on the
     // user's behalf (user-scoped Feishu API calls).
     runWithSender(message.senderOpenId, () => {
@@ -582,15 +623,54 @@ export class AgentBridge {
   private renderUserText(message: MessageContext): string {
     const sender = message.senderOpenId ? ` (from ${message.senderOpenId})` : ''
     const prefix = message.chatType === 'group' ? `[群聊${sender}] ` : ''
-    // Attach attachment keys so the model can download via the download tool.
+    // Attach the FILE key so the model can download it via the download tool.
+    // Image keys are NOT attached here — inbound images go to the model as an
+    // image content block (see resolveInboundImage).
     let attachmentHint = ''
     if (message.fileKey) {
       attachmentHint += `\n[附件] file_key=${message.fileKey} message_id=${message.messageId}（可用 feishu_download_file 获取内容）`
     }
-    if (message.imageKey) {
-      attachmentHint += `\n[图片] image_key=${message.imageKey} message_id=${message.messageId}（可用 feishu_download_file 获取内容）`
-    }
     return `${prefix}${message.text}${attachmentHint}`
+  }
+
+  /**
+   * Download and durably save an inbound Feishu image so it can ride the
+   * followup as an `image` content block (vision path). Returns undefined
+   * when the message has no image, the image cannot be downloaded, or the
+   * attachment service is unavailable — the model then sees the plain text
+   * placeholder only.
+   * @param message - the parsed inbound message.
+   * @returns the durable image reference, or undefined.
+   */
+  private async resolveInboundImage(message: MessageContext): Promise<ImageRef | undefined> {
+    if (message.imageKey === undefined) return undefined
+    const attachments = this.ctx.get('attachments') as AttachmentStore | undefined
+    if (attachments === undefined) {
+      blog('warn', `image ${message.messageId}: attachment service unavailable, falling back to text placeholder`)
+      return undefined
+    }
+    try {
+      const resource = await downloadMessageResource(
+        this.opts.client().client,
+        message.messageId,
+        message.imageKey,
+        'image',
+      )
+      const mediaType = imageMediaType(resource.contentType)
+      if (mediaType === undefined) {
+        blog('warn', `image ${message.messageId}: unsupported content-type "${resource.contentType ?? ''}", falling back to text`)
+        return undefined
+      }
+      return await attachments.saveImage({
+        data: new Uint8Array(resource.buffer),
+        mediaType,
+        name: `feishu-${message.messageId}`,
+      })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      blog('warn', `image ${message.messageId}: download/save failed: ${msg}; falling back to text`)
+      return undefined
+    }
   }
 
   /**
@@ -660,22 +740,29 @@ export class AgentBridge {
     return undefined
   }
 
-  /** List provider/model pairs registered in the llm runtime. */
-  private async availableModels(): Promise<Array<{ provider: string; model: string }>> {
+  /** List provider/model pairs registered in the llm runtime, plus the image-input capability. */
+  private async availableModels(): Promise<Array<{ provider: string; model: string; image: boolean }>> {
     const llm = this.ctx.get('llm') as
-      | { listProviders(): Array<{ id: string }>; listModels(provider: string): Promise<Array<{ id: string }>> }
+      | {
+        listProviders(): Array<{ id: string }>
+        listModels(provider: string): Promise<Array<{ id: string; inputModalities?: readonly string[] }>>
+      }
       | undefined
     if (!llm) return []
-    const result: Array<{ provider: string; model: string }> = []
+    const result: Array<{ provider: string; model: string; image: boolean }> = []
     for (const provider of llm.listProviders()) {
       try {
         const models = await llm.listModels(provider.id)
         for (const m of models) {
-          result.push({ provider: provider.id, model: m.id })
+          result.push({
+            provider: provider.id,
+            model: m.id,
+            image: Boolean(m.inputModalities?.includes('image')),
+          })
         }
       } catch {
         // Provider model listing failed — skip, still list the route itself.
-        result.push({ provider: provider.id, model: '*' })
+        result.push({ provider: provider.id, model: '*', image: false })
       }
     }
     return result
