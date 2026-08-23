@@ -563,8 +563,10 @@ export class AgentBridge {
       const text = extractAssistantText(event)
       if (!text) return
       if (streaming) {
-        // The final committed text supersedes the streamed buffer.
-        record.streamingCard?.appendAnswer(text)
+        // The final committed text is the authoritative answer — replace the
+        // streamed buffer (text-delta chunks already accumulated the same
+        // content) so the card never shows it twice.
+        record.streamingCard?.setAnswer(text)
         return
       }
       const sendParams: SendMessageParams = {

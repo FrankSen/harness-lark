@@ -116,6 +116,16 @@ export class StreamingCard {
     void this.flush.throttledUpdate(PATCH_THROTTLE_MS)
   }
 
+  /** Replace the accumulated answer with the final committed text. */
+  setAnswer(text: string): void {
+    if (this.settled || this.phase === 'error') return
+    if (this.phase !== 'streaming') {
+      this.phase = 'streaming'
+    }
+    this.answerBuffer = text
+    void this.flush.throttledUpdate(PATCH_THROTTLE_MS)
+  }
+
   /**
    * Complete the card with the final text. When reasoning was streamed,
    * the complete card shows a collapsible reasoning panel plus the answer.
