@@ -30,7 +30,7 @@ import { sendText, type SendMessageParams } from '../messaging/outbound/deliver.
 import { downloadMessageResource } from '../messaging/outbound/media.ts'
 import { addReaction, removeReaction, removeReactionByEmoji } from '../messaging/outbound/reactions.ts'
 import type { LarkClient } from '../core/lark-client.ts'
-import { runWithSender } from '../core/sender-context.ts'
+import { runWithTurn } from '../core/sender-context.ts'
 import { StreamingCard } from '../card/streaming-card.ts'
 import type { FooterSessionMetrics } from '../card/builder.ts'
 import { runCommand } from './commands.ts'
@@ -352,9 +352,13 @@ export class AgentBridge {
       source: { kind: 'user' },
     })
     blog('info', `followup to ${key}: ${text.slice(0, 60)}${imageRef !== undefined ? ` + image(${imageRef.bytes}B)` : ''}`)
-    // Record the sender so tools running inside this turn can act on the
-    // user's behalf (user-scoped Feishu API calls).
-    runWithSender(message.senderOpenId, () => {
+    // Record the sender + reply routing so tools running inside this turn can
+    // act on the user's behalf and the ask-user card lands in the same thread.
+    runWithTurn({
+      senderOpenId: message.senderOpenId,
+      replyToMessageId: message.messageId,
+      replyInThread: message.threadId !== undefined,
+    }, () => {
       record.agent.followup(userMessage)
     })
   }

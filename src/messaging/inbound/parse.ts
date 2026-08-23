@@ -90,15 +90,33 @@ function extractFileKey(event: FeishuMessageEvent): string | undefined {
   }
 }
 
-/** Extract image_key from an image message content payload. */
+/** Extract image_key from an image message or a post-embedded image. */
 function extractImageKey(event: FeishuMessageEvent): string | undefined {
   const msgType = event.message.msg_type ?? event.message.message_type ?? ''
-  if (msgType !== 'image') return undefined
   const content = event.message.content
   if (!content) return undefined
   try {
-    const parsed = JSON.parse(content) as { image_key?: string }
-    return parsed.image_key
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    if (msgType === 'image') {
+      return typeof parsed.image_key === 'string' ? parsed.image_key : undefined
+    }
+    if (msgType === 'post') {
+      // A group image arrives as a post with an `img` element carrying the
+      // image_key; pick the first one (a single-image post is the common case).
+      for (const key of ['content_v2', 'content', 'body']) {
+        const rows = parsed[key]
+        if (!Array.isArray(rows)) continue
+        for (const row of rows) {
+          if (!Array.isArray(row)) continue
+          for (const el of row) {
+            if (typeof el !== 'object' || el === null) continue
+            const e = el as Record<string, unknown>
+            if (e.tag === 'img' && typeof e.image_key === 'string') return e.image_key
+          }
+        }
+      }
+    }
+    return undefined
   } catch {
     return undefined
   }
@@ -185,16 +203,20 @@ function extractPostText(parsed: Record<string, unknown>): string {
         if (typeof e.text === 'string') push(e.text)
         return
       case 'at': {
-        // post-format mention: name in `user_id` (a display name, not an id)
-        // or `text`; emit @name so the model sees who was addressed.
-        const name = typeof e.user_id === 'string' ? e.user_id
-          : typeof e.text === 'string' ? e.text : ''
+        // post-format mention carries the display name in `user_name` (schema
+        // 2.0) or a legacy display name in `user_id`; `user_id` may also be a
+        // bare mention key (`@_user_1`), so prefer `user_name` then `text`.
+        const name = typeof e.user_name === 'string' && e.user_name !== ''
+          ? e.user_name
+          : (typeof e.user_id === 'string' && !e.user_id.startsWith('@_') ? e.user_id : '')
+          ?? (typeof e.text === 'string' ? e.text : '')
         push(name ? `@${name}` : '@')
         return
       }
       case 'img':
       case 'image':
-        push('[图片]')
+        // Post-embedded images ride the image content block (see extractImageKey);
+        // no placeholder text — the model sees the image itself.
         return
       case 'br':
         return

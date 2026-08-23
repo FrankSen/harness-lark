@@ -19,6 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { sendCard, updateCard } from '../messaging/outbound/deliver.ts'
 import type { LarkClient } from '../core/lark-client.ts'
+import { currentTurn } from '../core/sender-context.ts'
 
 /** One question as received by the tool (structural face of dsh's type). */
 export interface AskQuestionItem {
@@ -199,6 +200,8 @@ export function installFeishuAskUser(ctx: Context, options: FeishuAskUserOptions
           receiveId: chatId,
           receiveIdType: 'chat_id',
           card: buildAskCard(pending),
+          replyToMessageId: currentTurn()?.replyToMessageId,
+          replyInThread: currentTurn()?.replyInThread ?? false,
         })
         if (result.ok && result.messageId) {
           pending.cardMessageId = result.messageId

@@ -119,6 +119,33 @@ describe('parseMessageEvent', () => {
     expect(text).toContain('你好')
   })
 
+  it('extracts image_key from a group post with an embedded img element', () => {
+    // A group image (+ @bot) arrives as a post whose content_v2 rows carry an
+    // `img` element with the image_key, not a standalone image message.
+    const ev = textEvent({
+      message: {
+        ...textEvent().message!,
+        msg_type: 'post',
+        content: JSON.stringify({
+          title: '',
+          content: [[
+            { tag: 'img', image_key: 'img_v3_02ad_test', width: 400, height: 200 },
+          ]],
+          content_v2: [[
+            { tag: 'img', image_key: 'img_v3_02ad_test', width: 400, height: 200 },
+            { tag: 'at', user_id: '@_user_1', user_name: '（江山）的智能助手2号' },
+          ]],
+        }),
+      },
+    })
+    const ctx = parseMessageEvent(ev)
+    expect(ctx.imageKey).toBe('img_v3_02ad_test')
+    // The at mention resolves to the display name, and the img element adds no
+    // stray "[图片]" placeholder text.
+    expect(ctx.text).toContain('@（江山）的智能助手2号')
+    expect(ctx.text).not.toContain('[图片]')
+  })
+
   it('returns a placeholder for media types', () => {
     const ev = textEvent({
       message: { ...textEvent().message!, msg_type: 'image', content: '{}' },
