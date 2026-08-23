@@ -65,6 +65,12 @@ export async function handleMessageEvent(ctx: MonitorContext, data: unknown): Pr
 
     const parsed = parseMessageEvent(event, lark.botOpenId)
     log(`message ${msgId} from chat ${parsed.chatId} (${parsed.chatType})`)
+    // Diagnostic: dump the raw message type and content so parsing gaps (e.g.
+    // topic-creation messages, card schemas) can be fixed from real payloads.
+    if (process.env.HARNESS_LARK_DEBUG_EVENT === '1') {
+      const m = event.message as unknown as Record<string, unknown>
+      log(`DEBUG message ${msgId}: message_type=${String(m.message_type)} content=${JSON.stringify(m.content)} thread_id=${String(m.thread_id)}`)
+    }
 
     const target = bridge(parsed)
     if (target === undefined) {

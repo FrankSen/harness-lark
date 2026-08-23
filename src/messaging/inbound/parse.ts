@@ -147,30 +147,94 @@ function extractPlainText(event: FeishuMessageEvent): string {
 
 /** Recursively collect text from a post-format content payload. */
 function extractPostText(parsed: Record<string, unknown>): string {
-  const body = parsed.body
-  if (!Array.isArray(body)) return ''
   const parts: string[] = []
-  for (const block of body as unknown[]) {
-    if (!Array.isArray(block)) continue
-    for (const elem of block as unknown[]) {
-      if (typeof elem !== 'object' || elem === null) continue
-      const e = elem as Record<string, unknown>
-      if (e.tag === 'text' && typeof e.text === 'string') {
-        parts.push(e.text)
-      } else if (e.tag === 'a' && typeof e.text === 'string') {
-        parts.push(e.text)
-      } else if (e.tag === 'at' && typeof e.user_id === 'string') {
-        parts.push(`@${e.user_id}`)
-      }
+  const seen = new Set<string>()
+  const push = (text: string): void => {
+    const trimmed = text.trim()
+    if (trimmed !== '' && !seen.has(trimmed)) {
+      seen.add(trimmed)
+      parts.push(trimmed)
     }
   }
+
+  /** Walk one post block element, handling every element tag Feishu emits. */
+  const walkElement = (elem: unknown, depth: number): void => {
+    if (depth > 16 || elem == null) return
+    if (typeof elem === 'string') {
+      push(elem)
+      return
+    }
+    if (Array.isArray(elem)) {
+      for (const item of elem) walkElement(item, depth + 1)
+      return
+    }
+    if (typeof elem !== 'object') return
+    const e = elem as Record<string, unknown>
+    const tag = typeof e.tag === 'string' ? e.tag : ''
+    switch (tag) {
+      case 'text':
+        if (typeof e.text === 'string') push(e.text)
+        return
+      case 'md':
+      case 'markdown':
+        if (typeof e.text === 'string') push(e.text)
+        else if (typeof e.content === 'string') push(e.content)
+        return
+      case 'a':
+      case 'link':
+        if (typeof e.text === 'string') push(e.text)
+        return
+      case 'at': {
+        // post-format mention: name in `user_id` (a display name, not an id)
+        // or `text`; emit @name so the model sees who was addressed.
+        const name = typeof e.user_id === 'string' ? e.user_id
+          : typeof e.text === 'string' ? e.text : ''
+        push(name ? `@${name}` : '@')
+        return
+      }
+      case 'img':
+      case 'image':
+        push('[图片]')
+        return
+      case 'br':
+        return
+      default:
+        // Unknown tag: fall through and recurse into scalar/container fields.
+        for (const key of ['text', 'content', 'elements', 'lines']) {
+          const child = e[key]
+          if (child !== undefined && child !== null) walkElement(child, depth + 1)
+        }
+    }
+  }
+
+  // New SDK schema 2.0 post payloads use `content` / `content_v2` (rows of
+  // element lists); older envelopes use `body`. Prefer `content_v2` (md
+  // source) to avoid duplicating the same text from `content` (rendered
+  // spans); fall back to `content`, then legacy `body`.
+  const sourceKey = parsed.content_v2 !== undefined && Array.isArray(parsed.content_v2)
+    ? 'content_v2'
+    : parsed.content !== undefined && Array.isArray(parsed.content)
+      ? 'content'
+      : 'body'
+  const rows = parsed[sourceKey]
+  if (Array.isArray(rows)) {
+    for (const row of rows) walkElement(row, 0)
+  }
+
+  // `title` (a plain string) accompanies some posts.
+  if (typeof parsed.title === 'string') push(parsed.title)
+
   return parts.join('')
 }
 
 /**
  * Extract human-readable text from an interactive card (msg_type=interactive).
  * Cards may use the schema 2.0 (`json_card`), a legacy `card` object, or a
- * plain header+elements form. Returns the card title plus element text.
+ * plain header+elements form. Recursively collects text-bearing fields
+ * (`content`/`text`/`title`/`label`/`placeholder`) and container fields
+ * (`elements`/`fields`/`actions`/`columns`/`options`/`contents`/`property`),
+ * so nested layouts (div → markdown, column_set → column, …) yield their text
+ * instead of falling back to the bare `[卡片]` placeholder.
  */
 function extractCardText(parsed: Record<string, unknown>): string {
   // schema 2.0 card: { json_card: "{...}" }
@@ -182,31 +246,73 @@ function extractCardText(parsed: Record<string, unknown>): string {
     }
   }
 
-  const parts: string[] = []
-
-  // Header title.
-  const header = parsed.header as Record<string, unknown> | undefined
-  const title = header?.title as Record<string, unknown> | undefined
-  if (typeof title?.content === 'string') parts.push(title.content)
-  else if (typeof title?.text === 'string') parts.push(title.text)
-
-  // Element text (markdown / div / text / plain_text).
-  const elements = parsed.elements ?? (parsed.body as Record<string, unknown> | undefined)?.elements
-  if (Array.isArray(elements)) {
-    for (const el of elements as unknown[]) {
-      if (typeof el !== 'object' || el === null) continue
-      const e = el as Record<string, unknown>
-      if (typeof e.content === 'string') parts.push(e.content)
-      else if (typeof e.text === 'string') parts.push(e.text)
-      else {
-        const nested = (e.text ?? e.elements) as unknown
-        if (typeof nested === 'string') parts.push(nested)
-      }
+  // Feishu delivers interactive cards with the full v2 DSL embedded as a
+  // string under `user_dsl` (the top-level `elements` are a degraded fallback
+  // like "请升级至最新版本客户端"). Parse and prefer it so the model sees
+  // the real card content.
+  if (typeof parsed.user_dsl === 'string') {
+    try {
+      const dsl = JSON.parse(parsed.user_dsl) as Record<string, unknown>
+      return extractCardText(dsl)
+    } catch {
+      // fall through to the outer default
     }
   }
 
-  const joined = parts.filter((p) => p.trim() !== '').join('\n')
-  return joined || '[卡片]'
+  const parts: string[] = []
+  const seen = new Set<string>()
+  const push = (text: string): void => {
+    const trimmed = text.trim()
+    if (trimmed !== '' && !seen.has(trimmed)) {
+      seen.add(trimmed)
+      parts.push(trimmed)
+    }
+  }
+
+  /** Text fields considered "content" on any card node. */
+  const TEXT_KEYS = ['content', 'text', 'title', 'label', 'placeholder'] as const
+  /** Container fields recursed into for nested text. */
+  const CONTAINER_KEYS = ['elements', 'fields', 'actions', 'columns', 'options', 'contents', 'property'] as const
+
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 16 || node == null) return
+    if (typeof node === 'string') {
+      push(node)
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1)
+      return
+    }
+    if (typeof node !== 'object') return
+    const obj = node as Record<string, unknown>
+    // Pull top-level text fields, then recurse into containers. The dedup set
+    // keeps header.title (via `title`) from duplicating its `content`.
+    for (const key of TEXT_KEYS) {
+      const value = obj[key]
+      if (typeof value === 'string') {
+        push(value)
+      } else if (value !== undefined && value !== null) {
+        // Nested text element ({ tag, content }, { property: { ... } }): dive
+        // into it so a title/text/placeholder object yields its inner content.
+        walk(value, depth + 1)
+      }
+    }
+    for (const key of CONTAINER_KEYS) {
+      const child = obj[key]
+      if (child !== undefined && child !== null) walk(child, depth + 1)
+    }
+  }
+
+  // Card v2 body: { header: {...}, body: { elements: [...] } } — recurse into
+  // header and body explicitly since neither is in CONTAINER_KEYS.
+  walk(parsed.header, 0)
+  walk(parsed.body, 0)
+  // Legacy flat form: { elements: [...] } — already covered via CONTAINER_KEYS,
+  // but walk the root too in case text sits at top level (e.g. `markdown`).
+  walk(parsed.elements, 0)
+
+  return parts.join('\n') || '[卡片]'
 }
 
 /**
