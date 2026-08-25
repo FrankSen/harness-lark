@@ -81,3 +81,21 @@ COPY --from=plugin-build /plugin /plugins/harness-lark
 COPY docker-entrypoint.sh /usr/local/bin/dsh-entrypoint
 RUN chmod +x /usr/local/bin/dsh-entrypoint
 ENTRYPOINT ["dsh-entrypoint"]
+
+# ── combined: plain dsh AND pi-web in one image, switch via APP ───────────
+# Boots dsh web (no Feishu plugin) by default; set APP=pi-web to run the pi
+# coding agent web UI. Based on `plain` so dsh needs no Feishu credentials.
+# pi-web ships a pre-built Next.js app on npm (no source build needed here).
+FROM plain AS combined
+ARG PIWEB_VERSION=latest
+RUN npm install -g @agegr/pi-web@${PIWEB_VERSION} --no-audit --no-fund
+# pi-web's Next.js server binds 0.0.0.0 on 30141; sessions live under
+# PI_CODING_AGENT_DIR (default ~/.pi). Persist it alongside the dsh volume.
+ENV PI_CODING_AGENT_DIR=/root/.pi
+VOLUME /root/.pi
+EXPOSE 30141
+# The plain HEALTHCHECK probes 3080; when APP=pi-web the app is on 30141.
+# Probe the port that matches the selected app so both modes report healthy.
+HEALTHCHECK --interval=20s --timeout=5s --start-period=25s --retries=5 \
+  CMD node -e "const p=process.env.APP==='pi-web'?(process.env.PI_WEB_PORT||30141):3080;fetch('http://127.0.0.1:'+p).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["dsh-entrypoint"]
